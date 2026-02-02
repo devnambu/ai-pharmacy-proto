@@ -1,0 +1,52 @@
+name: Deploy to Staging (Cloud Run)
+
+on:
+  push:
+    branches:
+      - develop
+
+jobs:
+  deploy:
+    name: Deploy to Staging Environment
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker asia-northeast1-docker.pkg.dev
+
+      - name: Build and Push Docker Image
+        run: |
+          docker build -t asia-northeast1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/ai-pharmacy/app:staging-${{ github.sha }} .
+          docker push asia-northeast1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/ai-pharmacy/app:staging-${{ github.sha }}
+
+      - name: Deploy to Cloud Run (Staging)
+        run: |
+          gcloud run deploy ai-pharmacy-staging \
+            --image asia-northeast1-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/ai-pharmacy/app:staging-${{ github.sha }} \
+            --region asia-northeast1 \
+            --platform managed \
+            --allow-unauthenticated \
+            --set-env-vars AI_PROVIDER=${{ secrets.AI_PROVIDER }} \
+            --set-env-vars OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY_STAGING }}
+
+      - name: Show staging URL
+        run: |
+          echo "Staging deployment successful!"
+          gcloud run services describe ai-pharmacy-staging --region asia-northeast1 --format 'value(status.url)'
