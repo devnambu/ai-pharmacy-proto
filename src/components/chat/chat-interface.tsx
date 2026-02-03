@@ -5,7 +5,7 @@ import { DefaultChatTransport } from "ai";
 import { useRef, useEffect, useState, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Send, Mic, MicOff, User, Bot, Loader2 } from "lucide-react";
+import { Send, Mic, MicOff, User, Bot, Loader2, X } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 export function ChatInterface() {
@@ -246,15 +246,31 @@ export function ChatInterface() {
                                 onChange={(e) => setInput(e.target.value)}
                                 placeholder="服薬指導のメッセージを入力..."
                                 rows={1}
-                                className="w-full resize-none rounded-xl border border-slate-600 bg-slate-700/50 px-4 py-3 text-white placeholder-slate-400 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 transition-all"
+                                className="w-full resize-none rounded-xl border border-slate-600 bg-slate-700/50 px-4 py-3 pr-10 text-white placeholder-slate-400 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 transition-all"
                                 onKeyDown={(e) => {
                                     if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
                                         e.preventDefault();
                                         handleSubmit(e);
                                     }
+                                    // Shift+Spaceで入力内容を削除
+                                    if (e.key === " " && e.shiftKey) {
+                                        e.preventDefault();
+                                        setInput("");
+                                    }
                                 }}
                                 disabled={status !== "ready"}
                             />
+                            {/* 削除ボタン */}
+                            {input && (
+                                <button
+                                    type="button"
+                                    onClick={() => setInput("")}
+                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition-colors"
+                                    aria-label="入力を削除"
+                                >
+                                    <X className="h-4 w-4" />
+                                </button>
+                            )}
                         </div>
 
                         <Button
