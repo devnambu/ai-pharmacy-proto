@@ -13,6 +13,7 @@
     "@ai-sdk/openai": "^3.0.7",
     "@ai-sdk/react": "^3.0.29",
     "@google-cloud/secret-manager": "^6.1.1",
+    "@google-cloud/speech": "^7.2.1",
     "@radix-ui/react-scroll-area": "^1.2.10",
     "@radix-ui/react-slot": "^1.2.4",
     "ai": "^6.0.27",
