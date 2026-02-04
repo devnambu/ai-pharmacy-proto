@@ -334,7 +334,7 @@ export function ChatInterface() {
                     </div>
 
                     <p className="text-xs text-slate-500 mt-2 text-center">
-                        Enter で送信 / Shift + Enter で改行 / マイクボタンで音声入力
+                        Enter で送信 / Shift + Enter で改行 / マイクボタンで音声入力(スペースキーでも可)
                     </p>
                 </form>
             </div>
