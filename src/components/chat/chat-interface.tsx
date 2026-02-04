@@ -17,6 +17,7 @@ export function ChatInterface() {
 
     const [input, setInput] = useState("");
     const scrollRef = useRef<HTMLDivElement>(null);
+    const textareaRef = useRef<HTMLTextAreaElement>(null);
 
     // 音声録音関連のstate
     const [isRecording, setIsRecording] = useState(false);
@@ -126,17 +127,42 @@ export function ChatInterface() {
             alert("音声認識のリクエストに失敗しました。");
         } finally {
             setIsTranscribing(false);
+            // 文字起こし完了後に入力欄をフォーカス
+            textareaRef.current?.focus();
         }
     };
 
     // マイクボタンのクリックハンドラー
-    const handleMicClick = () => {
+    const handleMicClick = useCallback(() => {
         if (isRecording) {
             stopRecording();
         } else {
             startRecording();
         }
-    };
+    }, [isRecording, stopRecording, startRecording]);
+
+    // グローバルキーイベント: 入力欄がアクティブでない場合にスペースキーで音声入力をトグル
+    useEffect(() => {
+        const handleGlobalKeyDown = (e: KeyboardEvent) => {
+            // 入力欄がフォーカスされている場合は無視
+            if (document.activeElement === textareaRef.current) {
+                return;
+            }
+            // 他の入力要素（input, textarea等）がフォーカスされている場合は無視
+            const activeElement = document.activeElement;
+            if (activeElement && (activeElement.tagName === "INPUT" || activeElement.tagName === "TEXTAREA" || (activeElement as HTMLElement).isContentEditable)) {
+                return;
+            }
+            // スペースキーで音声入力をトグル（文字起こし中でなければ）
+            if (e.key === " " && !e.shiftKey && !isTranscribing && status === "ready") {
+                e.preventDefault();
+                handleMicClick();
+            }
+        };
+
+        window.addEventListener("keydown", handleGlobalKeyDown);
+        return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+    }, [handleMicClick, isTranscribing, status]);
 
     const isLoading = status === "streaming" || status === "submitted";
 
@@ -239,9 +265,10 @@ export function ChatInterface() {
             {/* Input Area */}
             <div className="flex-shrink-0 border-t border-slate-700/50 bg-slate-800/50 backdrop-blur-sm">
                 <form onSubmit={handleSubmit} className="max-w-4xl mx-auto px-4 py-4">
-                    <div className="flex gap-3 items-end">
-                        <div className="flex-1 relative">
+                    <div className="flex gap-3 items-center">
+                        <div className="flex-1 relative flex items-center">
                             <textarea
+                                ref={textareaRef}
                                 value={input}
                                 onChange={(e) => setInput(e.target.value)}
                                 placeholder="服薬指導のメッセージを入力..."
