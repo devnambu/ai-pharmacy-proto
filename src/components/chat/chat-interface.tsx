@@ -5,8 +5,12 @@ import { DefaultChatTransport } from "ai";
 import { useRef, useEffect, useState, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
-import { Send, Mic, MicOff, User, Bot, Loader2, X } from "lucide-react";
+import { Mic, MicOff, User, Bot, Loader2, X } from "lucide-react";
 import { cn } from "@/lib/utils";
+
+// 無音検出の設定
+const SILENCE_THRESHOLD = 10; // 音声レベルの閾値（0-255）
+const SILENCE_DURATION = 2000; // 無音と判定するまでの時間（ミリ秒）
 
 export function ChatInterface() {
     const { messages, sendMessage, status } = useChat({
@@ -22,8 +26,16 @@ export function ChatInterface() {
     // 音声録音関連のstate
     const [isRecording, setIsRecording] = useState(false);
     const [isTranscribing, setIsTranscribing] = useState(false);
+    const [hasStartedOnce, setHasStartedOnce] = useState(false); // 初回手動開始フラグ
     const mediaRecorderRef = useRef<MediaRecorder | null>(null);
     const audioChunksRef = useRef<Blob[]>([]);
+    const streamRef = useRef<MediaStream | null>(null);
+
+    // 無音検出用
+    const audioContextRef = useRef<AudioContext | null>(null);
+    const analyserRef = useRef<AnalyserNode | null>(null);
+    const silenceStartRef = useRef<number | null>(null);
+    const animationFrameRef = useRef<number | null>(null);
 
     // Auto-scroll to bottom when new messages arrive
     useEffect(() => {
@@ -32,60 +44,35 @@ export function ChatInterface() {
         }
     }, [messages]);
 
-    const handleSubmit = (e: React.FormEvent) => {
-        e.preventDefault();
-        if (input.trim() && status === "ready") {
-            sendMessage({ text: input });
-            setInput("");
+    // 音声レベル監視を停止
+    const stopAudioLevelMonitoring = useCallback(() => {
+        if (animationFrameRef.current) {
+            cancelAnimationFrame(animationFrameRef.current);
+            animationFrameRef.current = null;
         }
-    };
-
-    // 音声録音を開始
-    const startRecording = useCallback(async () => {
-        try {
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            const mediaRecorder = new MediaRecorder(stream, {
-                mimeType: "audio/webm;codecs=opus",
-            });
-
-            audioChunksRef.current = [];
-
-            mediaRecorder.ondataavailable = (event) => {
-                if (event.data.size > 0) {
-                    audioChunksRef.current.push(event.data);
-                }
-            };
-
-            mediaRecorder.onstop = async () => {
-                // ストリームを停止
-                stream.getTracks().forEach((track) => track.stop());
-
-                // 音声データをBlobに変換
-                const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
-
-                // 文字起こしを実行
-                await transcribeAudio(audioBlob);
-            };
-
-            mediaRecorderRef.current = mediaRecorder;
-            mediaRecorder.start();
-            setIsRecording(true);
-        } catch (error) {
-            console.error("マイクへのアクセスに失敗しました:", error);
-            alert("マイクへのアクセスが許可されていません。ブラウザの設定を確認してください。");
+        if (audioContextRef.current) {
+            audioContextRef.current.close();
+            audioContextRef.current = null;
         }
+        analyserRef.current = null;
+        silenceStartRef.current = null;
     }, []);
 
-    // 音声録音を停止
-    const stopRecording = useCallback(() => {
-        if (mediaRecorderRef.current && isRecording) {
+    // 録音停止（手動呼び出し）
+    const stopRecordingInternal = useCallback(() => {
+        if (mediaRecorderRef.current && mediaRecorderRef.current.state === "recording") {
             mediaRecorderRef.current.stop();
-            setIsRecording(false);
         }
-    }, [isRecording]);
+        if (streamRef.current) {
+            streamRef.current.getTracks().forEach((track) => track.stop());
+            streamRef.current = null;
+        }
+        stopAudioLevelMonitoring();
+        setIsRecording(false);
+    }, [stopAudioLevelMonitoring]);
 
-    // 音声データを文字起こし
-    const transcribeAudio = async (audioBlob: Blob) => {
+    // 音声データを文字起こしして送信
+    const transcribeAndSend = useCallback(async (audioBlob: Blob) => {
         setIsTranscribing(true);
 
         try {
@@ -114,23 +101,115 @@ export function ChatInterface() {
             const result = await response.json();
 
             if (result.success && result.transcription) {
-                // 文字起こし結果を入力欄に追加
-                setInput((prev) =>
-                    prev ? `${prev} ${result.transcription}` : result.transcription
-                );
+                // 文字起こし結果を直接送信
+                const transcribedText = result.transcription.trim();
+                if (transcribedText) {
+                    setInput(transcribedText);
+                    sendMessage({ text: transcribedText });
+                    setInput("");
+                }
             } else if (!result.success) {
                 console.error("文字起こしエラー:", result.error, result.details);
-                alert(`音声認識に失敗しました: ${result.error || "不明なエラー"}`);
             }
         } catch (error) {
             console.error("文字起こしリクエストエラー:", error);
-            alert("音声認識のリクエストに失敗しました。");
         } finally {
             setIsTranscribing(false);
-            // 文字起こし完了後に入力欄をフォーカス
-            textareaRef.current?.focus();
         }
-    };
+    }, [sendMessage]);
+
+    // 音声レベル監視（無音検出）
+    const monitorAudioLevel = useCallback((stopRecordingFn: () => void) => {
+        if (!analyserRef.current) return;
+
+        const analyser = analyserRef.current;
+        const dataArray = new Uint8Array(analyser.frequencyBinCount);
+
+        const checkLevel = () => {
+            if (!analyserRef.current) return;
+
+            analyser.getByteFrequencyData(dataArray);
+
+            // 平均音量を計算
+            const average = dataArray.reduce((sum, value) => sum + value, 0) / dataArray.length;
+
+            if (average < SILENCE_THRESHOLD) {
+                // 無音状態
+                if (silenceStartRef.current === null) {
+                    silenceStartRef.current = Date.now();
+                } else if (Date.now() - silenceStartRef.current >= SILENCE_DURATION) {
+                    // 2秒間無音が続いた → 録音停止
+                    console.log("無音検出: 録音を停止します");
+                    stopRecordingFn();
+                    return;
+                }
+            } else {
+                // 音声あり → タイマーリセット
+                silenceStartRef.current = null;
+            }
+
+            animationFrameRef.current = requestAnimationFrame(checkLevel);
+        };
+
+        checkLevel();
+    }, []);
+
+    // 音声録音を開始
+    const startRecording = useCallback(async () => {
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            streamRef.current = stream;
+
+            // AudioContextで音声レベル監視をセットアップ
+            const audioContext = new AudioContext();
+            audioContextRef.current = audioContext;
+
+            const source = audioContext.createMediaStreamSource(stream);
+            const analyser = audioContext.createAnalyser();
+            analyser.fftSize = 256;
+            source.connect(analyser);
+            analyserRef.current = analyser;
+
+            const mediaRecorder = new MediaRecorder(stream, {
+                mimeType: "audio/webm;codecs=opus",
+            });
+
+            audioChunksRef.current = [];
+
+            mediaRecorder.ondataavailable = (event) => {
+                if (event.data.size > 0) {
+                    audioChunksRef.current.push(event.data);
+                }
+            };
+
+            mediaRecorder.onstop = async () => {
+                // 音声データをBlobに変換
+                const audioBlob = new Blob(audioChunksRef.current, { type: "audio/webm" });
+
+                // 最小サイズチェック（ほぼ空の録音を無視）
+                if (audioBlob.size > 1000) {
+                    await transcribeAndSend(audioBlob);
+                }
+            };
+
+            mediaRecorderRef.current = mediaRecorder;
+            mediaRecorder.start(100); // 100msごとにデータを取得
+            setIsRecording(true);
+            setHasStartedOnce(true);
+
+            // 無音検出を開始
+            monitorAudioLevel(stopRecordingInternal);
+
+        } catch (error) {
+            console.error("マイクへのアクセスに失敗しました:", error);
+            alert("マイクへのアクセスが許可されていません。ブラウザの設定を確認してください。");
+        }
+    }, [monitorAudioLevel, stopRecordingInternal, transcribeAndSend]);
+
+    // 手動で録音を停止
+    const stopRecording = useCallback(() => {
+        stopRecordingInternal();
+    }, [stopRecordingInternal]);
 
     // マイクボタンのクリックハンドラー
     const handleMicClick = useCallback(() => {
@@ -141,19 +220,37 @@ export function ChatInterface() {
         }
     }, [isRecording, stopRecording, startRecording]);
 
-    // グローバルキーイベント: 入力欄がアクティブでない場合にスペースキーで音声入力をトグル
+    // AI応答完了後に自動で録音を再開
+    useEffect(() => {
+        // 初回は手動開始が必要（ユーザーアクション）
+        if (!hasStartedOnce) return;
+        // 文字起こし中は待機
+        if (isTranscribing) return;
+        // すでに録音中なら何もしない
+        if (isRecording) return;
+        // AI応答が完了したら録音再開
+        if (status === "ready" && messages.length > 0) {
+            // 少し遅延を入れて自然な間を作る
+            const timer = setTimeout(() => {
+                startRecording();
+            }, 500);
+            return () => clearTimeout(timer);
+        }
+    }, [status, hasStartedOnce, isTranscribing, isRecording, messages.length, startRecording]);
+
+    // グローバルキーイベント: スペースキーで音声入力をトグル
     useEffect(() => {
         const handleGlobalKeyDown = (e: KeyboardEvent) => {
             // 入力欄がフォーカスされている場合は無視
             if (document.activeElement === textareaRef.current) {
                 return;
             }
-            // 他の入力要素（input, textarea等）がフォーカスされている場合は無視
+            // 他の入力要素がフォーカスされている場合は無視
             const activeElement = document.activeElement;
             if (activeElement && (activeElement.tagName === "INPUT" || activeElement.tagName === "TEXTAREA" || (activeElement as HTMLElement).isContentEditable)) {
                 return;
             }
-            // スペースキーで音声入力をトグル（文字起こし中でなければ）
+            // スペースキーで音声入力をトグル
             if (e.key === " " && !e.shiftKey && !isTranscribing && status === "ready") {
                 e.preventDefault();
                 handleMicClick();
@@ -201,7 +298,7 @@ export function ChatInterface() {
                             <p className="text-slate-400 max-w-md mx-auto">
                                 あなたは薬剤師役です。患者の佐藤健太さんに服薬指導を行ってください。
                                 <br />
-                                まずは挨拶から始めてみましょう。
+                                マイクボタンを押して話しかけてください。
                             </p>
                         </div>
                     )}
@@ -264,79 +361,60 @@ export function ChatInterface() {
 
             {/* Input Area */}
             <div className="flex-shrink-0 border-t border-slate-700/50 bg-slate-800/50 backdrop-blur-sm">
-                <form onSubmit={handleSubmit} className="max-w-4xl mx-auto px-4 py-4">
-                    <div className="flex gap-3 items-center">
-                        <div className="flex-1 relative flex items-center">
+                <div className="max-w-4xl mx-auto px-4 py-4">
+                    <div className="flex gap-3 items-center justify-center">
+                        {/* テキスト入力欄（非表示だが残す） */}
+                        <div className="hidden">
                             <textarea
                                 ref={textareaRef}
                                 value={input}
                                 onChange={(e) => setInput(e.target.value)}
                                 placeholder="服薬指導のメッセージを入力..."
                                 rows={1}
-                                className="w-full resize-none rounded-xl border border-slate-600 bg-slate-700/50 px-4 py-3 pr-10 text-white placeholder-slate-400 focus:border-emerald-500 focus:outline-none focus:ring-2 focus:ring-emerald-500/20 transition-all"
-                                onKeyDown={(e) => {
-                                    if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                                        e.preventDefault();
-                                        handleSubmit(e);
-                                    }
-                                    // Shift+Spaceで入力内容を削除
-                                    if (e.key === " " && e.shiftKey) {
-                                        e.preventDefault();
-                                        setInput("");
-                                    }
-                                }}
+                                className="w-full resize-none rounded-xl border border-slate-600 bg-slate-700/50 px-4 py-3 pr-10 text-white placeholder-slate-400"
                                 disabled={status !== "ready"}
                             />
-                            {/* 削除ボタン */}
-                            {input && (
-                                <button
-                                    type="button"
-                                    onClick={() => setInput("")}
-                                    className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white transition-colors"
-                                    aria-label="入力を削除"
-                                >
-                                    <X className="h-4 w-4" />
-                                </button>
-                            )}
                         </div>
 
+                        {/* マイクボタン（大きく中央配置） */}
                         <Button
                             type="button"
                             variant="outline"
                             size="icon"
                             className={cn(
-                                "h-12 w-12 rounded-xl border-slate-600 transition-all",
+                                "h-20 w-20 rounded-full border-2 transition-all",
                                 isRecording
-                                    ? "bg-red-500 border-red-500 text-white hover:bg-red-600 hover:border-red-600 animate-pulse"
+                                    ? "bg-red-500 border-red-500 text-white hover:bg-red-600 hover:border-red-600 animate-pulse scale-110"
                                     : isTranscribing
                                         ? "bg-amber-500 border-amber-500 text-white"
-                                        : "bg-slate-700/50 text-slate-300 hover:bg-slate-600 hover:text-white"
+                                        : isLoading
+                                            ? "bg-slate-600 border-slate-600 text-slate-400"
+                                            : "bg-gradient-to-r from-emerald-500 to-cyan-500 border-emerald-500 text-white hover:from-emerald-600 hover:to-cyan-600 hover:scale-105"
                             )}
                             onClick={handleMicClick}
-                            disabled={isTranscribing || status !== "ready"}
+                            disabled={isTranscribing || isLoading}
                         >
                             {isTranscribing ? (
-                                <Loader2 className="h-5 w-5 animate-spin" />
+                                <Loader2 className="h-8 w-8 animate-spin" />
                             ) : isRecording ? (
-                                <MicOff className="h-5 w-5" />
+                                <MicOff className="h-8 w-8" />
                             ) : (
-                                <Mic className="h-5 w-5" />
+                                <Mic className="h-8 w-8" />
                             )}
-                        </Button>
-
-                        <Button
-                            type="submit"
-                            disabled={status !== "ready" || !input.trim()}
-                            className="h-12 w-12 rounded-xl bg-gradient-to-r from-emerald-500 to-cyan-500 hover:from-emerald-600 hover:to-cyan-600 text-white shadow-lg shadow-emerald-500/25 disabled:opacity-50 disabled:shadow-none transition-all"
-                        >
-                            <Send className="h-5 w-5" />
                         </Button>
                     </div>
 
-                    <p className="text-xs text-slate-500 mt-2 text-center">
-                        Enter で送信 / Shift + Enter で改行 / マイクボタンで音声入力(スペースキーでも可)
+                    <p className="text-xs text-slate-500 mt-3 text-center">
+                        {isRecording
+                            ? "話し終わると自動で送信されます（2秒の無音で送信）"
+                            : isTranscribing
+                                ? "音声を認識中..."
+                                : isLoading
+                                    ? "患者が応答中..."
+                                    : "マイクボタンを押して話しかけてください（スペースキーでも可）"
+                        }
                     </p>
-                </form>
+                </div>
             </div>
         </div>
     );
