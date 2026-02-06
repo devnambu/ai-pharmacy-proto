@@ -36,6 +36,7 @@ export function ChatInterface() {
     const analyserRef = useRef<AnalyserNode | null>(null);
     const silenceStartRef = useRef<number | null>(null);
     const animationFrameRef = useRef<number | null>(null);
+    const hasVoiceDetectedRef = useRef<boolean>(false); // 音声が検出されたか
 
     // Auto-scroll to bottom when new messages arrive
     useEffect(() => {
@@ -56,6 +57,7 @@ export function ChatInterface() {
         }
         analyserRef.current = null;
         silenceStartRef.current = null;
+        hasVoiceDetectedRef.current = false; // リセット
     }, []);
 
     // 録音停止（手動呼び出し）
@@ -134,17 +136,20 @@ export function ChatInterface() {
             const average = dataArray.reduce((sum, value) => sum + value, 0) / dataArray.length;
 
             if (average < SILENCE_THRESHOLD) {
-                // 無音状態
-                if (silenceStartRef.current === null) {
-                    silenceStartRef.current = Date.now();
-                } else if (Date.now() - silenceStartRef.current >= SILENCE_DURATION) {
-                    // 2秒間無音が続いた → 録音停止
-                    console.log("無音検出: 録音を停止します");
-                    stopRecordingFn();
-                    return;
+                // 無音状態（音声が一度検出された後のみタイマー開始）
+                if (hasVoiceDetectedRef.current) {
+                    if (silenceStartRef.current === null) {
+                        silenceStartRef.current = Date.now();
+                    } else if (Date.now() - silenceStartRef.current >= SILENCE_DURATION) {
+                        // 2秒間無音が続いた → 録音停止
+                        console.log("無音検出: 録音を停止します");
+                        stopRecordingFn();
+                        return;
+                    }
                 }
             } else {
-                // 音声あり → タイマーリセット
+                // 音声あり → フラグを立て、タイマーリセット
+                hasVoiceDetectedRef.current = true;
                 silenceStartRef.current = null;
             }
 
