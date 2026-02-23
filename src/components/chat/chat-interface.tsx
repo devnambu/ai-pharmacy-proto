@@ -10,7 +10,7 @@ import { cn } from "@/lib/utils";
 
 // 無音検出の設定
 const SILENCE_THRESHOLD = 10; // 音声レベルの閾値（0-255）
-const SILENCE_DURATION = 2000; // 無音と判定するまでの時間（ミリ秒）
+const SILENCE_DURATION = 1000; // 無音と判定するまでの時間（ミリ秒）
 
 export function ChatInterface() {
     const { messages, sendMessage, status } = useChat({
